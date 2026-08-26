@@ -25,6 +25,34 @@ Under the verdict is every way to make the trip — one bus or one change — ra
 actually arrive**, not by how soon something departs. A bus leaving in 2 minutes that crawls is a
 worse answer than one leaving in 9 that doesn't, and the ranking says so.
 
+## You type addresses, not bus stops
+
+**From** and **To** take an address, a building, a landmark or a 6-digit postal code. Working out
+which stop or station to walk to is the app's job, not yours — that was always the point, and asking
+you to pick the stop first was making you do the routing by hand.
+
+```
+Tampines Mall · 4 Tampines Central 5, Tampines
+Jurong Point  · 1 Jurong West Central 2, Jurong West
+```
+
+Geocoding is [Photon](https://photon.komoot.io/), keyless and CORS-open, bounded to a Singapore
+bounding box. **Not OneMap**, which is the authoritative Singapore geocoder and would have been the
+obvious choice: every call now answers `"Authentication token missing"` and its routing endpoint
+401s, so using it would mean a backend holding a secret — and this app has neither.
+
+Three things make the result list usable rather than raw OSM output:
+
+- **Deduped.** OpenStreetMap frequently holds one place as several features — the mall, its
+  building, its entrance. Same name and same type collapse to one row.
+- **Typed.** A small chip (`MRT`, `MALL`, `AREA`, `SCHOOL`…) is what makes three results all called
+  "Tampines East" tellable apart: one is a suburb, one a station, one a block of flats.
+- **Addressable first.** A result with a street or house number outranks a vague area.
+
+**Recent places** are remembered, so a commute you make twice a day is one tap. And if the geocoder
+can't be reached, the picker falls back to searching the 5,207 stop and 146 station names already in
+memory, and says that's what it's doing.
+
 ## The whole trip, with a clock time on every step
 
 Tap the crosshair and it reads your location, finds the stop to walk to, and lays out the journey
@@ -122,9 +150,11 @@ for the same reason.
 - **The second leg's wait is a guess.** Live arrivals tell you about *now*, not about the moment
   you'll reach the transfer stop 20 minutes from now. A flat 6 minutes is assumed and labelled
   `~` wherever it's shown.
-- **Stops, not addresses.** Destination search covers the 5,207 bus stops. SG stop names are
-  landmarks ("Holland V", "one-north Stn", "Bugis Stn/Parkview Sq") so this goes further than it
-  sounds, but it isn't a place search. OneMap's would need an API token, which would mean a backend.
+- **OSM address coverage is thinner than OneMap's**, particularly for HDB block numbers — searching
+  a specific `Blk 123` lands you in the right neighbourhood rather than at the right door. Buildings,
+  malls, schools, stations and postal codes resolve well. This is the price of not needing a token.
+- **Photon is a free shared service.** Search is debounced at 320 ms and needs 3 characters before
+  it fires, which is both politeness and the reason it doesn't feel twitchy.
 
 ## APIs
 
@@ -137,6 +167,7 @@ server and no secrets.
 | [`stops.json`](https://data.busrouter.sg/v1/stops.json) | 5,207 stops as `[lng, lat, name, road]` |
 | [`services.json`](https://data.busrouter.sg/v1/services.json) | 605 services, each with its ordered stop list per direction — this is what makes routing possible |
 | [2-hour forecast](https://api-open.data.gov.sg/v2/real-time/api/two-hr-forecast) | data.gov.sg, 47 areas. Whether it's about to pour changes whether you run |
+| [Photon](https://photon.komoot.io/) | Address, building and postal-code search over OpenStreetMap. Keyless, CORS-open, built for type-ahead; `bbox` pins it to Singapore |
 | `data/rail.json` | 146 MRT stations, vendored here — 10 KB distilled from [cheeaun/sgraildata](https://github.com/cheeaun/sgraildata) by `scripts/build-rail-data.py`. Same origin as the page, so no third-party fetch and no upstream outage can take the trains away. Rebuild it with `python3 scripts/build-rail-data.py` |
 
 The first three are by [cheeaun](https://github.com/cheeaun), whose
@@ -146,6 +177,8 @@ gives up on.
 
 ## How the routing works
 
+0. Geocode both endpoints to coordinates. Everything below works from a latitude and longitude,
+   which is why swapping stop-pickers for address search touched almost none of it.
 1. Index every stop → the services and positions that call at it (605 services × 2 directions).
 2. Take all stops within 500 m of origin and destination.
 3. **Direct:** any service+direction hitting an origin stop at index `i` and a destination stop at
