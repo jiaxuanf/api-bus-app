@@ -48,6 +48,8 @@ Three things make the result list usable rather than raw OSM output:
 - **Typed.** A small chip (`MRT`, `MALL`, `AREA`, `SCHOOL`…) is what makes three results all called
   "Tampines East" tellable apart: one is a suburb, one a station, one a block of flats.
 - **Addressable first.** A result with a street or house number outranks a vague area.
+- **Postal codes surface first.** A 6-digit code anywhere in the query is searched separately and its
+  results are put at the top, because in Singapore a postal code identifies one building exactly.
 
 **Recent places** are remembered, so a commute you make twice a day is one tap. And if the geocoder
 can't be reached, the picker falls back to searching the 5,207 stop and 146 station names already in
@@ -181,9 +183,17 @@ for the same reason.
 - **The second leg's wait is a guess.** Live arrivals tell you about *now*, not about the moment
   you'll reach the transfer stop 20 minutes from now. A flat 6 minutes is assumed and labelled
   `~` wherever it's shown.
-- **OSM address coverage is thinner than OneMap's**, particularly for HDB block numbers — searching
-  a specific `Blk 123` lands you in the right neighbourhood rather than at the right door. Buildings,
-  malls, schools, stations and postal codes resolve well. This is the price of not needing a token.
+- **Company and shop names often aren't findable, and no keyless source fixes that.** OpenStreetMap
+  has roughly **1,766 office POIs in the whole of Singapore**, so a tenant inside a building usually
+  isn't mapped — searching "Ensign InfoSecurity" returns nothing from Photon *or* Nominatim, and
+  Overpass confirms OSM holds no feature named Ensign anywhere in the country. OneMap without a token
+  returns zero results for company names too. The way round it is the **6-digit postal code**, which
+  names exactly one building and which every company publishes; the app extracts one from anywhere in
+  the query, so `Ensign InfoSecurity 339213` resolves even though the name alone does not. It also
+  strips corporate filler (`Pte Ltd`, `company`, `HQ`) and retries before giving up, and when it does
+  give up it says why rather than shrugging.
+- **HDB block numbers land in the right neighbourhood, not at the right door**, for the same reason.
+  Buildings, malls, schools, stations, streets and postal codes all resolve well.
 - **Photon is a free shared service.** Search is debounced at 320 ms and needs 3 characters before
   it fires, which is both politeness and the reason it doesn't feel twitchy.
 

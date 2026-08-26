@@ -281,7 +281,8 @@ body{
   padding:1.15rem 1rem; text-align:center; color:var(--ink-2); font-size:.92rem;
   display:flex; flex-direction:column; gap:.6rem; align-items:center;
 }
-.note b{font-family:"Oswald", sans-serif; font-size:1.15rem; color:var(--ink); font-weight:600; text-transform:uppercase; letter-spacing:.02em}
+.note > b{font-family:"Oswald", sans-serif; font-size:1.15rem; color:var(--ink); font-weight:600; text-transform:uppercase; letter-spacing:.02em}
+.note span b{color:var(--ink); font-weight:600}
 .skel{height:5.2rem; border-radius:13px; border:1px solid var(--line); background:var(--surface); position:relative; overflow:hidden}
 .skel::after{content:""; position:absolute; inset:0; background:linear-gradient(90deg,transparent,var(--surface-2),transparent); animation:sweep 1.1s infinite}
 @keyframes sweep{from{transform:translateX(-100%)} to{transform:translateX(100%)}}
@@ -361,7 +362,7 @@ footer p + p{margin-top:.5rem}
   <div class="bar">
     <label class="field">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
-      <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Address, building or postal code" aria-label="Search for an address">
+      <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Address, building or 6-digit postal code" aria-label="Search for an address">
     </label>
     <button class="btn ghost" id="closesheet" type="button">Cancel</button>
   </div>
@@ -1257,14 +1258,42 @@ function asPlace(f){
            precise: !!(p.housenumber || p.street) };
 }
 
+/* A Singapore postal code names exactly one building, which makes it the most reliable
+   thing anyone can type — and the thing every company puts on its own website. */
+const POSTCODE_RE = /\b(\d{6})\b/;
+
+/* Corporate filler carries no geography. Stripping it turns "Acme Pte Ltd office"
+   into something the map might actually contain. */
+const FILLER_RE = /\b(pte|ltd|llp|inc|company|co|corp|corporation|holdings|group|hq|headquarters|office|singapore|s'pore|sg)\b\.?/gi;
+
+async function photon(q, signal){
+  const url = `${GEOCODE_URL}?limit=8&lang=en&bbox=${SG_BBOX}&q=${encodeURIComponent(q)}`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return (await res.json()).features || [];
+}
+
 async function geocode(q){
   if (geoCtl) geoCtl.abort();
   geoCtl = new AbortController();
-  const url = `${GEOCODE_URL}?limit=8&lang=en&bbox=${SG_BBOX}&q=${encodeURIComponent(q)}`;
-  const res = await fetch(url, { signal: geoCtl.signal });
-  if (!res.ok) throw new Error("HTTP " + res.status);
-  const data = await res.json();
-  geoCtl = null;
+  const signal = geoCtl.signal;
+
+  let features = await photon(q, signal);
+
+  // A postal code buried in the query ("Acme Pte Ltd, 339213") is the strongest signal
+  // in it, so search that too and put those results first.
+  const pc = q.match(POSTCODE_RE);
+  if (pc && pc[1] !== q.trim())
+    features = [...await photon(pc[1], signal), ...features];
+
+  // Nothing at all? Drop the filler words and give the map a second chance.
+  if (!features.length){
+    const trimmed = q.replace(FILLER_RE, " ").replace(/\s+/g, " ").trim();
+    if (trimmed && trimmed.toLowerCase() !== q.trim().toLowerCase())
+      features = await photon(trimmed, signal);
+  }
+
+  const data = { features };
 
   // OSM often holds one place as several features — the mall, its building, its entrance,
   // and the suburb around it. Same name and same sort of thing is one answer to a traveller,
@@ -1278,6 +1307,19 @@ async function geocode(q){
   });
   // an addressable result beats a vague area with the same relevance
   return places.sort((a, b) => (b.precise ? 1 : 0) - (a.precise ? 1 : 0));
+}
+
+/* Being specific about why beats "no results". Company and shop names are the weak spot
+   in OpenStreetMap — roughly 1,800 offices are mapped in the whole of Singapore — and the
+   way round it is the postal code, which every company publishes on its own site. */
+function noMatchNote(q){
+  const looksLikeName = !/\d/.test(q) && q.trim().split(/\s+/).length >= 2;
+  return `<div class="note"><b>Not on the map</b>
+    <span>Nothing in Singapore matches “${esc(q)}”.${looksLikeName
+      ? " Company and shop names are patchy in OpenStreetMap — only around 1,800 offices in the whole country are mapped, and a tenant inside a building usually isn't one of them."
+      : ""}</span>
+    <span>The reliable way in is the <b>6-digit postal code</b> from their website — it names exactly one building. A street address or the building's own name also works.</span>
+  </div>`;
 }
 
 const PIN_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s7-6.3 7-11a7 7 0 1 0-14 0c0 4.7 7 11 7 11Z"/><circle cx="12" cy="10" r="2.2"/></svg>';
@@ -1327,7 +1369,8 @@ async function renderOptions(q){
       rows.push(...recents.map(p => placeRow(p, "recent")));
     }
     rows.push(`<div class="note" style="margin-top:.6rem"><b>Type an address</b>
-      <span>A building, a street, a landmark or a 6-digit postal code — anywhere in Singapore.</span></div>`);
+      <span>A building, a street, a landmark or a 6-digit postal code — anywhere in Singapore.</span>
+      <span style="font-size:.84rem">Searching for a company by name often won't find it; its postal code always will.</span></div>`);
     box.innerHTML = rows.join("");
     return;
   }
@@ -1343,7 +1386,7 @@ async function renderOptions(q){
     if ($("sheet").hidden || $("q").value.trim() !== q) return;   // user moved on
     box.innerHTML = places.length
       ? places.map(p => placeRow(p, "address")).join("")
-      : `<div class="note"><b>No address found</b><span>Nothing in Singapore matches “${esc(q)}”. Try a building name, a street, or a postal code.</span></div>`;
+      : noMatchNote(q);
   } catch (err){
     if (err.name === "AbortError") return;
     const local = localMatches(q);
