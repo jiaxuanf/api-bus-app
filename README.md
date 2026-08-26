@@ -25,13 +25,40 @@ Under the verdict is every way to make the trip — one bus or one change — ra
 actually arrive**, not by how soon something departs. A bus leaving in 2 minutes that crawls is a
 worse answer than one leaving in 9 that doesn't, and the ranking says so.
 
+## The whole trip, with a clock time on every step
+
+Tap the crosshair and it reads your location, finds the stop to walk to, and lays out the journey
+as a timeline — not a list of durations you have to add up yourself:
+
+```
+13:54   set off — 110 m on foot
+13:56   reach Bef Quality Rd                          2 min
+14:01   board bus 246                            5 min wait
+~14:08  alight Blk 151 · 7 stops                      7 min
+~14:09  walk 40 m to CISCO Recall                     1 min
+~14:15  board bus 30                             6 min wait
+~14:42  alight Bef Pasir Panjang PO · 20 stops       28 min
+~14:45  walk 160 m — arrive Opp West Coast Pk         3 min
+```
+
+Every row carries the time you'll *be* there. A leading `~` means that time rests on a modelled
+number rather than a live one — so you can see at a glance exactly where the certainty runs out:
+everything up to boarding is real, everything after it is arithmetic.
+
+## Location
+
+The crosshair beside **From** is one tap. If you've already granted permission on a previous
+visit, the app uses it on load without prompting again; if you haven't, nothing happens until you
+ask for it. Either way the coordinates are used in the browser to sort the stop list and never
+leave it — there is no server here to send them to.
+
 ## What's live and what's estimated
 
 This distinction matters, so the app states it in its own footer too.
 
 **Live:** arrivals at your boarding stop, from `arrivelah2`, refreshed every 20 seconds — including
 crowding (`SEA` / `SDA` / `LSD`, drawn as the three-bar load meter) and the next three buses, so a
-"Missed it" can look past the first one.
+"Missed it" can look past the first one. Times shown without a `~` are anchored to this.
 
 **Estimated**, with every constant named at the top of the script so you can argue with them:
 

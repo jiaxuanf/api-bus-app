@@ -94,13 +94,16 @@ body{
 .od .slot .val{display:block; font-weight:500; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .od .slot .val.empty{color:var(--ink-3); font-weight:400}
 .od .rule{grid-column:1 / -1; height:1px; background:var(--line); margin:0 .2rem}
-.od .swap{
-  grid-row:1 / span 3; grid-column:3; align-self:center; width:2.2rem; height:2.2rem;
-  display:grid; place-items:center; border-radius:8px; cursor:pointer;
+.od .mini{
+  width:2.2rem; height:2.2rem; display:grid; place-items:center; border-radius:8px; cursor:pointer;
   background:var(--surface-2); border:1px solid var(--line); color:var(--ink-2);
+  transition:border-color .15s ease, color .15s ease;
 }
-.od .swap:hover{border-color:var(--accent); color:var(--accent)}
-.od .swap:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+.od .mini:hover{border-color:var(--accent); color:var(--accent)}
+.od .mini:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+.od .mini[data-busy="1"]{color:var(--accent); border-color:var(--accent)}
+.od .mini[data-busy="1"] svg{animation:spin 1.1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 
 /* ---------- verdict hero ---------- */
 .verdict{
@@ -160,18 +163,29 @@ body{
 .eta b{font-family:"Oswald", sans-serif; font-weight:600; font-size:1.15rem; font-variant-numeric:tabular-nums}
 .eta span{display:block; font-family:"DM Mono", monospace; font-size:.62rem; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3)}
 .legs{display:flex; flex-direction:column; gap:.05rem; border-left:2px solid var(--line); margin-left:.35rem; padding-left:.75rem}
-.leg{display:flex; gap:.5rem; align-items:baseline; font-size:.87rem; padding:.16rem 0; position:relative}
+.leg{
+  display:grid; grid-template-columns:3.1rem 1fr auto; gap:.1rem .6rem; align-items:baseline;
+  font-size:.87rem; padding:.2rem 0; position:relative;
+}
 .leg::before{
-  content:""; position:absolute; left:-1.02rem; top:.62rem; width:.42rem; height:.42rem;
+  content:""; position:absolute; left:-1.02rem; top:.66rem; width:.42rem; height:.42rem;
   border-radius:50%; background:var(--line-2);
 }
 .leg.ride::before{background:var(--accent)}
-.leg .dur{
-  font-family:"DM Mono", monospace; font-size:.74rem; color:var(--ink-2);
-  flex:0 0 3.5rem; font-variant-numeric:tabular-nums;
+.leg.stopover::before{background:var(--surface); border:2px solid var(--accent); width:.5rem; height:.5rem; left:-1.06rem}
+.leg .clk{
+  font-family:"DM Mono", monospace; font-size:.8rem; font-weight:500; color:var(--ink);
+  font-variant-numeric:tabular-nums; letter-spacing:-.02em;
 }
-.leg .what{flex:1; min-width:0; color:var(--ink-2)}
+.leg .clk.est{color:var(--ink-2)}
+.leg .clk.est::before{content:"~"; color:var(--ink-3)}
+.leg .what{min-width:0; color:var(--ink-2)}
 .leg .what b{color:var(--ink); font-weight:500}
+.leg .dur{
+  font-family:"DM Mono", monospace; font-size:.72rem; color:var(--ink-3);
+  font-variant-numeric:tabular-nums; white-space:nowrap;
+}
+.leg.wait .what{font-style:italic}
 .next{
   font-family:"DM Mono", monospace; font-size:.72rem; font-weight:500;
   flex:0 0 auto; font-variant-numeric:tabular-nums;
@@ -262,8 +276,8 @@ footer p + p{margin-top:.5rem}
       <span class="lbl">From</span>
       <span class="val empty" id="val-from">Where are you now?</span>
     </button>
-    <button class="swap" id="swap" type="button" aria-label="Swap origin and destination">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16m0 0-3.5-3.5M7 20l3.5-3.5M17 20V4m0 0-3.5 3.5M17 4l3.5 3.5"/></svg>
+    <button class="mini" id="locate" type="button" aria-label="Use my current location" title="Use my current location">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="8"/><path d="M12 1.6v2.6M12 19.8v2.6M22.4 12h-2.6M4.2 12H1.6"/></svg>
     </button>
     <span class="rule"></span>
     <span class="pip b" aria-hidden="true">
@@ -272,6 +286,9 @@ footer p + p{margin-top:.5rem}
     <button class="slot" id="slot-to" type="button">
       <span class="lbl">To</span>
       <span class="val empty" id="val-to">Where are you going?</span>
+    </button>
+    <button class="mini" id="swap" type="button" aria-label="Swap origin and destination" title="Swap">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16m0 0-3.5-3.5M7 20l3.5-3.5M17 20V4m0 0-3.5 3.5M17 4l3.5 3.5"/></svg>
     </button>
   </section>
 
@@ -580,14 +597,11 @@ function decide(j, now){
 /* ---------------- rendering ---------------- */
 const VERDICT_WORD = { run: "Run", soon: "Walk now", calm: "You have time", miss: "Missed it" };
 
+// no live arrival means no known wait — assume a typical one rather than zero, so a
+// service with no data can't leapfrog one we can actually see coming
 function tripArriveAt(j, d){
-  const after = j.legs[0].ride
-    + (j.change ? j.change.walkMin + TRANSFER_WAIT + j.legs[1].ride : 0)
-    + j.walk2Min;
-  // no live arrival means no known wait — assume a typical one rather than zero,
-  // so a service with no data can't leapfrog one we can actually see coming
-  const board = d && d.boardAt ? d.boardAt : Date.now() + (j.walk1Min + UNKNOWN_WAIT) * 60000;
-  return board + after * 60000;
+  const rows = timeline(j, d);
+  return rows[rows.length - 1].t;
 }
 
 function loadBars(load){
@@ -595,33 +609,72 @@ function loadBars(load){
   return `<span class="load" data-l="${esc(load)}" aria-hidden="true"><i></i><i></i><i></i></span>`;
 }
 
-function legsHtml(j){
+const hhmm = t => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+/* Every waypoint of the trip with the clock time you reach it.
+   `est` marks a time that rests on a modelled number rather than a live one —
+   everything after boarding does, and so does the boarding itself with no live arrival. */
+function timeline(j, d){
+  const now = Date.now(), M = 60000;
   const rows = [];
-  const b = BY_CODE.get(j.board);
-  rows.push(atStop(j.walk1)
-    ? `<div class="leg"><span class="dur">—</span>
-        <span class="what">you're at <b>${esc(b ? b.name : j.board)}</b></span></div>`
-    : `<div class="leg"><span class="dur">${mins(j.walk1Min)}</span>
-        <span class="what">walk ${metres(j.walk1)} to <b>${esc(b ? b.name : j.board)}</b></span></div>`);
+  const boardStop = BY_CODE.get(j.board);
+
+  const reachStop = now + j.walk1Min * M;
+  const boardAt = d && d.boardAt ? d.boardAt : reachStop + UNKNOWN_WAIT * M;
+  const liveBoard = !!(d && d.boardAt);
+
+  rows.push({ t: now, est: false, kind: "start", dur: "",
+    text: atStop(j.walk1)
+      ? `you're at <b>${esc(boardStop ? boardStop.name : j.board)}</b>`
+      : `set off — <b>${metres(j.walk1)}</b> on foot` });
+
+  if (!atStop(j.walk1))
+    rows.push({ t: reachStop, est: false, kind: "stopover", dur: mins(j.walk1Min),
+      text: `reach <b>${esc(boardStop ? boardStop.name : j.board)}</b>` });
+
+  // one row per boarding: the clock is when you get on, the duration is what you
+  // spent waiting to do it. Two rows would put the same moment on the page twice.
+  const waitMin = (boardAt - reachStop) / M;
+  let t = boardAt;
 
   j.legs.forEach((leg, n) => {
+    const waited = n === 0 ? waitMin : (j.change ? TRANSFER_WAIT : 0);
+    rows.push({ t, est: n > 0 || !liveBoard, kind: "ride",
+      text: `board bus <b>${esc(leg.svc)}</b>`,
+      dur: waited > 0.5 ? `${Math.round(waited)} min wait` : "" });
+
+    t += leg.ride * M;
     const alight = BY_CODE.get(leg.to);
-    rows.push(`<div class="leg ride"><span class="dur">${mins(leg.ride)}</span>
-      <span class="what">bus <b>${esc(leg.svc)}</b> · ${leg.stops} stop${leg.stops === 1 ? "" : "s"} to <b>${esc(alight ? alight.name : leg.to)}</b></span></div>`);
+    rows.push({ t, est: true, kind: "stopover", dur: mins(leg.ride),
+      text: `alight <b>${esc(alight ? alight.name : leg.to)}</b> · ${leg.stops} stop${leg.stops === 1 ? "" : "s"}` });
+
     if (n === 0 && j.change){
-      const cTo = BY_CODE.get(j.change.to);
-      const walkBit = j.change.walk > 20 ? `walk ${metres(j.change.walk)} to <b>${esc(cTo ? cTo.name : j.change.to)}</b>, ` : "";
-      rows.push(`<div class="leg"><span class="dur">~${Math.round(j.change.walkMin + TRANSFER_WAIT)} min</span>
-        <span class="what">change: ${walkBit}then wait <b>~${TRANSFER_WAIT} min</b></span></div>`);
+      if (j.change.walk > 20){
+        t += j.change.walkMin * M;
+        const cTo = BY_CODE.get(j.change.to);
+        rows.push({ t, est: true, kind: "stopover", dur: mins(j.change.walkMin),
+          text: `walk ${metres(j.change.walk)} to <b>${esc(cTo ? cTo.name : j.change.to)}</b>` });
+      }
+      t += TRANSFER_WAIT * M;   // becomes the moment you board the connecting bus
     }
   });
 
-  rows.push(atStop(j.walk2)
-    ? `<div class="leg"><span class="dur">—</span>
-        <span class="what">arrive at <b>${esc(to.name)}</b></span></div>`
-    : `<div class="leg"><span class="dur">${mins(j.walk2Min)}</span>
-        <span class="what">walk ${metres(j.walk2)} to <b>${esc(to.name)}</b></span></div>`);
-  return rows.join("");
+  t += j.walk2Min * M;
+  rows.push({ t, est: true, kind: "end", dur: atStop(j.walk2) ? "" : mins(j.walk2Min),
+    text: atStop(j.walk2)
+      ? `arrive <b>${esc(to.name)}</b>`
+      : `walk ${metres(j.walk2)} — arrive <b>${esc(to.name)}</b>` });
+
+  return rows;
+}
+
+function legsHtml(j, d){
+  return timeline(j, d).map(r =>
+    `<div class="leg ${r.kind}">
+       <span class="clk${r.est ? " est" : ""}">${esc(hhmm(r.t))}</span>
+       <span class="what">${r.text}</span>
+       <span class="dur">${esc(r.dur)}</span>
+     </div>`).join("");
 }
 
 function tripHtml(j, d, isBest){
@@ -639,7 +692,7 @@ function tripHtml(j, d, isBest){
       ${nextChip}${loadBars(d && d.load)}
       <div class="eta"><b>${esc(new Date(arriveAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}</b><span>${totalMin} min total</span></div>
     </div>
-    <div class="legs">${legsHtml(j)}</div>
+    <div class="legs">${legsHtml(j, d)}</div>
   </article>`;
 }
 
@@ -656,8 +709,10 @@ function heroHtml(j, d){
       ? `Bus <b>${esc(j.legs[0].svc)}</b>, from <b>${where}</b> — the stop you're standing at.`
       : `Take bus <b>${esc(j.legs[0].svc)}</b> from <b>${where}</b> — ${metres(j.walk1)} away, about ${mins(j.walk1Min)} on foot.`;
 
+  const arriveAt = tripArriveAt(j, d);
   const counter = d.missedAll ? "" :
-    `<div class="leave"><span class="big" id="countdown" data-leave="${d.boardAt - j.walk1Min * 60000}">–:––</span> <span>until you must set off</span></div>`;
+    `<div class="leave"><span class="big" id="countdown" data-leave="${d.boardAt - j.walk1Min * 60000}">–:––</span>
+       <span>until you set off · board ${esc(hhmm(d.boardAt))} · arrive ~${esc(hhmm(arriveAt))}</span></div>`;
 
   return `<section class="verdict" data-v="${d.verdict}" aria-live="polite">
     <div class="vhead"><span class="vword">${esc(word)}</span><span class="vbus">${esc(j.legs[0].svc)}</span></div>
@@ -730,9 +785,16 @@ async function go({ replan = true } = {}){
 
 function renderPrompt(){
   stopTimers();
-  main.innerHTML = `<div class="note"><b>${from ? "Where are you going?" : "Where are you now?"}</b>
-    <span>${from ? "Pick a destination and this will tell you which bus to start walking for." : "Use your location, or search for the stop you're standing at."}</span>
-    <button class="btn" type="button" data-open="${from ? "to" : "from"}">${from ? "Set destination" : "Set starting point"}</button></div>`;
+  main.innerHTML = from
+    ? `<div class="note"><b>Where are you going?</b>
+        <span>Pick a destination and this will tell you which bus to start walking for, and when you'll get there.</span>
+        <button class="btn" type="button" data-open="to">Set destination</button></div>`
+    : `<div class="note"><b>Where are you now?</b>
+        <span>Share your location and this finds the stop to walk to, the bus to take, and the time you'll arrive.</span>
+        <div style="display:flex;gap:.5rem;flex-wrap:wrap;justify-content:center">
+          <button class="btn" type="button" data-here="1">Use my location</button>
+          <button class="btn ghost" type="button" data-open="from">Search for a stop</button>
+        </div></div>`;
 }
 
 /* ---------------- rain (data.gov.sg) ---------------- */
@@ -808,14 +870,25 @@ function renderOptions(q){
   $("results").innerHTML = rows.join("");
 }
 
-function useHere(){
+const GEO_ERR = e =>
+  (e.code === 1 ? "Permission denied." : e.code === 3 ? "It took too long." : "Position unavailable.") +
+  " Search for the stop you're standing at instead.";
+
+// One entry point for locating, whether it came from the GPS button, the picker,
+// or a silent retry when permission was already granted on a previous visit.
+function locate({ silent = false } = {}){
   if (!navigator.geolocation){
-    renderOptionsError("This browser can't share a location. Search for the stop you're standing at instead.");
+    if (!silent) showLocateError("This browser can't share a location.");
     return;
   }
-  $("results").innerHTML = `<div class="note"><b>Finding you…</b><span>Your location is used in the browser and never sent anywhere.</span></div>`;
+  const btn = $("locate");
+  btn.dataset.busy = "1";
+  if (!silent && !$("sheet").hidden)
+    $("results").innerHTML = `<div class="note"><b>Finding you…</b><span>Your location is used here in the browser and never sent anywhere.</span></div>`;
+
   navigator.geolocation.getCurrentPosition(
     pos => {
+      delete btn.dataset.busy;
       const near = nearStops({ lat: pos.coords.latitude, lng: pos.coords.longitude }, 800, 1)[0];
       setPlace("from", {
         kind: "here", lat: pos.coords.latitude, lng: pos.coords.longitude,
@@ -823,19 +896,34 @@ function useHere(){
       });
       closeSheet();
     },
-    err => renderOptionsError(
-      (err.code === 1 ? "Permission denied." : err.code === 3 ? "It took too long." : "Position unavailable.") +
-      " Search for the stop you're standing at instead.")
-  , { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+    err => {
+      delete btn.dataset.busy;
+      if (!silent) showLocateError(GEO_ERR(err));
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+  );
 }
-function renderOptionsError(msg){
-  $("results").innerHTML = `<div class="note"><b>No location</b><span>${esc(msg)}</span></div>`;
+
+function showLocateError(msg){
+  const target = !$("sheet").hidden ? $("results") : main;
+  target.innerHTML = `<div class="note"><b>No location</b><span>${esc(msg)}</span>
+    <button class="btn ghost" type="button" data-open="from">Search for a stop</button></div>`;
+}
+
+// If the browser already trusts us with location, use it without a fresh prompt.
+async function autoLocate(){
+  if (from || !navigator.permissions || !navigator.geolocation) return;
+  try {
+    const st = await navigator.permissions.query({ name: "geolocation" });
+    if (st.state === "granted") locate({ silent: true });
+  } catch (e){ /* Safari and friends may not support the query — no harm */ }
 }
 
 /* ---------------- events ---------------- */
 $("slot-from").addEventListener("click", () => openSheet("from"));
 $("slot-to").addEventListener("click", () => openSheet("to"));
 $("closesheet").addEventListener("click", closeSheet);
+$("locate").addEventListener("click", () => locate());
 $("swap").addEventListener("click", () => {
   if (!from && !to) return;
   const a = from, b = to;
@@ -865,7 +953,7 @@ document.addEventListener("click", e => {
     closeSheet();
     return;
   }
-  if (e.target.closest("[data-here]")) return useHere();
+  if (e.target.closest("[data-here]")) return locate();
   const open = e.target.closest("[data-open]");
   if (open) return openSheet(open.dataset.open);
 });
@@ -898,6 +986,7 @@ document.addEventListener("visibilitychange", () => {
     }
   }
   if (from && to) go(); else renderPrompt();
+  autoLocate();
 })();
 </script>
 </body>
