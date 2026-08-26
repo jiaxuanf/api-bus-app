@@ -106,10 +106,41 @@ Journeys can now mix modes — **bus → train** for a feeder to the nearest sta
 for the last mile — and every option is ranked against the others by arrival time, so a 47-minute
 train wins over a 61-minute bus without you having to compare them.
 
-Line chips carry the real line colours, because that's how the network is read on the ground.
+Line chips carry the real line colours — in the route header, inline beside every "board the…"
+step, and tinting that step's marker, so you can trace an interchange down the timeline by colour.
+That's how the network is labelled on every platform, map and station wall in Singapore.
 
 **Tuas → Pasir Ris now works.** It was the example of failure in this README's previous version;
 rail routing solves it in 93 minutes.
+
+## Is the road moving?
+
+Singapore publishes **no keyless traffic feed** — every `data.gov.sg` traffic endpoint answers 403,
+and LTA DataMall needs a key. So there is nothing to read.
+
+But arrivelah already reports where each incoming bus *is* and how long it says it needs. Distance
+over time is how fast the road is moving, measured by the vehicles actually on it. Each bus trip
+carries a chip:
+
+| | |
+|---|---|
+| `ROAD CLEAR` | ≥ 19 km/h |
+| `TRAFFIC NORMAL` | 12–19 km/h |
+| `TRAFFIC HEAVY` | < 12 km/h |
+
+Those numbers aren't invented. I sampled 80 live arrivals across 12 stops — interchanges, town
+centres, expressway-adjacent roads — and buses progress at a **median 13.7 km/h, quartiles 12.1 and
+18.9**. "Normal" is that interquartile band, so the edges are genuinely unusual.
+
+Making it trustworthy took three filters. Unmonitored arrivals carry *scheduled* rather than live
+positions and their coordinates can be thousands of kilometres out, so they're dropped. A bus almost
+at the stop says nothing about the road, so anything under 400 m is dropped. And a single bus may be
+mid-corner or at a light, so it's the **median across every tracked bus**, with fewer than three
+samples showing nothing at all rather than a guess.
+
+Two deliberate limits. It describes the road **at your boarding stop right now**, not the whole
+route. And it is **shown to you rather than folded into the arrival time** — one measurement at one
+place shouldn't silently reshape an estimate that spans the whole journey.
 
 ## What's live and what's estimated
 

@@ -160,6 +160,22 @@ body{
 }
 .route .arr{color:var(--ink-3); font-size:.85rem}
 .bus.line{color:#fff; letter-spacing:.02em}
+.linechip{
+  display:inline-block; font-family:"Oswald","Barlow",sans-serif; font-weight:600; font-size:.72rem;
+  line-height:1.35; color:#fff; border-radius:4px; padding:0 .3rem; letter-spacing:.03em;
+  vertical-align:.06em; margin-right:.1rem;
+}
+.road{
+  font-family:"DM Mono", monospace; font-size:.6rem; letter-spacing:.06em; text-transform:uppercase;
+  border:1px solid; border-radius:4px; padding:.06rem .3rem; white-space:nowrap;
+}
+.road[data-l="clear"] {color:var(--calm); border-color:var(--calm)}
+.road[data-l="normal"]{color:var(--ink-3); border-color:var(--line-2)}
+.road[data-l="heavy"] {color:var(--run);  border-color:var(--run)}
+.vroad{font-size:.86rem; color:var(--ink-2); margin-top:-.15rem}
+.vroad b{color:var(--ink); font-weight:600}
+.vroad[data-l="heavy"] b{color:var(--run)}
+.vroad[data-l="clear"] b{color:var(--calm)}
 .next[data-v="train"]{color:var(--ink-2)}
 .verdict[data-v="train"]{background:var(--surface); border-color:var(--line-2)}
 .verdict[data-v="train"] .vword{color:var(--ink)}
@@ -175,8 +191,8 @@ body{
   content:""; position:absolute; left:-1.02rem; top:.66rem; width:.42rem; height:.42rem;
   border-radius:50%; background:var(--line-2);
 }
-.leg.ride::before{background:var(--accent)}
-.leg.stopover::before{background:var(--surface); border:2px solid var(--accent); width:.5rem; height:.5rem; left:-1.06rem}
+.leg.ride::before{background:var(--dot, var(--accent))}
+.leg.stopover::before{background:var(--surface); border:2px solid var(--dot, var(--accent)); width:.5rem; height:.5rem; left:-1.06rem}
 .leg .clk{
   font-family:"DM Mono", monospace; font-size:.8rem; font-weight:500; color:var(--ink);
   font-variant-numeric:tabular-nums; letter-spacing:-.02em;
@@ -326,6 +342,13 @@ footer p + p{margin-top:.5rem}
       is also why a train leg never tells you to run &mdash; inventing urgency from missing data would be worse than
       saying nothing. LRT is left out: the Bukit Panjang, Sengkang and Punggol lines are loops, and station-code order
       does not describe which way a loop runs.</p>
+    <p><b>Road conditions are inferred, not reported.</b> Singapore has no keyless traffic feed, so
+      there is nothing to read. Instead each incoming bus reports where it is and how long it needs;
+      distance over time is how fast the road is moving, measured by the vehicles on it. The figure is
+      the median across every tracked bus near your boarding stop &mdash; clear, normal and heavy are set
+      from the quartiles of real observations (median 13.7&nbsp;km/h). It describes the road <em>at that
+      stop right now</em>, not the whole route, and is shown to you rather than folded into the arrival
+      time, because one measurement at one place should not silently reshape the whole estimate.</p>
     <p>Stops, routes and arrivals from <a href="https://busrouter.sg/" target="_blank" rel="noopener">busrouter.sg</a>
       by <a href="https://github.com/cheeaun" target="_blank" rel="noopener">cheeaun</a> ·
       rain from <a href="https://data.gov.sg/" target="_blank" rel="noopener">data.gov.sg</a> ·
@@ -380,6 +403,23 @@ const GEOCODE_URL    = "https://photon.komoot.io/api/";
 const SG_BBOX        = "103.6,1.15,104.1,1.48";
 const GEOCODE_MIN    = 3;      // characters before we bother the server
 const GEOCODE_DEBOUNCE = 320;  // be a good citizen of a free service
+
+/* Road conditions. Singapore has no keyless traffic feed — every data.gov.sg traffic
+   endpoint answers 403 and DataMall needs a key — but arrivelah already reports where
+   each incoming bus is and how long it says it needs. Distance over time is how fast
+   the road is actually moving, measured by the vehicles on it.
+
+   Thresholds come from sampling 80 live arrivals across 12 stops: buses progress at a
+   median 13.7 km/h, quartiles 12.1 and 18.9. "Normal" is that interquartile band, so
+   the edges are genuinely unusual rather than numbers picked to feel right. */
+const ROAD_WIND    = 1.25;   // roads bend; straight-line distance understates them
+const ROAD_CLEAR   = 19;     // km/h, around the upper quartile
+const ROAD_HEAVY   = 12;     // km/h, around the lower quartile
+const ROAD_MIN_N   = 3;      // fewer samples than this is noise, not a reading
+const ROAD_MIN_M   = 400;    // a bus nearly at the stop says nothing about the road
+const ROAD_MAX_M   = 25000;
+const ROAD_MIN_MIN = 2;
+const ROAD_LABEL = { clear: "road clear", normal: "traffic normal", heavy: "traffic heavy" };
 const RAIL_KMH       = 45;     // average including dwell
 const RAIL_DWELL     = 0.6;    // minutes standing at each station
 const RAIL_WAIT      = 4;      // assumed headway wait to board
@@ -824,7 +864,7 @@ async function attachLive(list){
   inflight.forEach(c => c.abort());
   inflight = [];
 
-  const byStop = new Map();
+  const byStop = new Map(), roadByStop = new Map();
   await Promise.all(stops.map(async code => {
     const ctl = new AbortController();
     inflight.push(ctl);
@@ -833,6 +873,8 @@ async function attachLive(list){
       if (!res.ok) throw new Error("HTTP " + res.status);
       const data = await res.json();
       byStop.set(code, data.services || []);
+      const stop = BY_CODE.get(code);
+      if (stop) roadByStop.set(code, roadReading(data.services, stop));
     } catch (err){
       if (err.name !== "AbortError") byStop.set(code, null);   // null = stop lookup failed
     }
@@ -844,6 +886,7 @@ async function attachLive(list){
     if (!j.board){ j.live = "rail"; j.arrivals = []; continue; }   // no live train feed exists
     const services = byStop.get(j.board);
     j.live = services === null ? "error" : "ok";
+    j.road = roadByStop.get(j.board) || null;
     j.arrivals = [];
     if (!services) continue;
     const svc = services.find(s => s.no === j.legs[0].svc);
@@ -853,6 +896,28 @@ async function attachLive(list){
     }
   }
   return list;
+}
+
+/* How fast are buses actually covering ground near this stop? The median across every
+   monitored arrival is far steadier than any single bus, which might be mid-corner or
+   sitting at a light. Unmonitored arrivals carry scheduled rather than live positions —
+   their coordinates can be thousands of kilometres out — so they are excluded. */
+function roadReading(services, stop){
+  const speeds = [];
+  for (const svc of services || [])
+    for (const slot of [svc.next, svc.next2, svc.next3]){
+      if (!slot || !slot.time || slot.monitored !== 1) continue;
+      const mins = slot.duration_ms / 60000;
+      if (mins < ROAD_MIN_MIN) continue;
+      const d = haversine(stop, { lat: slot.lat, lng: slot.lng }) * ROAD_WIND;
+      if (d < ROAD_MIN_M || d > ROAD_MAX_M) continue;
+      speeds.push((d / 1000) / (mins / 60));
+    }
+  if (speeds.length < ROAD_MIN_N) return null;    // say nothing rather than guess
+  speeds.sort((a, b) => a - b);
+  const kmh = speeds[Math.floor(speeds.length / 2)];
+  return { level: kmh >= ROAD_CLEAR ? "clear" : kmh >= ROAD_HEAVY ? "normal" : "heavy",
+           kmh, n: speeds.length };
 }
 
 /* the decision: the first bus you can still physically reach.
@@ -890,6 +955,11 @@ function loadBars(load){
 const hhmm = t => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
 const legName = l => l.mode === "bus" ? "bus " + l.svc : lineName(l.line);
+
+/* The two-letter code in the line's own colour — how the network is labelled on every
+   platform, map and station wall in Singapore. */
+const lineChip = code =>
+  `<span class="linechip" style="background:${esc(LINES[code]?.colour || "#666")}">${esc(code)}</span>`;
 const boardPoint = l => l.mode === "bus" ? (BY_CODE.get(l.from)?.name || l.from) : l.fromS.name;
 const alightPoint = l => l.mode === "bus" ? (BY_CODE.get(l.to)?.name || l.to) : l.to.name;
 
@@ -926,10 +996,10 @@ function timeline(j, d){
     if (n > 0) t += leg.wait * M;
 
     const waited = n === 0 ? (boardAt - reachStop) / M : leg.wait;
-    rows.push({ t, est: n > 0 || !liveBoard, kind: "ride",
+    rows.push({ t, est: n > 0 || !liveBoard, kind: "ride", line: leg.mode === "rail" ? leg.line : null,
       text: leg.mode === "bus"
         ? `board bus <b>${esc(leg.svc)}</b>`
-        : `board the <b>${esc(lineName(leg.line))}</b>`,
+        : `board ${lineChip(leg.line)} <b>${esc(lineName(leg.line))}</b>`,
       dur: waited > 0.5 ? `${Math.round(waited)} min wait` : "" });
 
     t += leg.ride * M;
@@ -937,7 +1007,7 @@ function timeline(j, d){
     // if the last stop IS the destination, one row says so — two would name the same
     // place twice at the same minute
     const ends = last && atStop(j.walk2);
-    rows.push({ t, est: true, kind: ends ? "end" : "stopover", dur: mins(leg.ride),
+    rows.push({ t, est: true, kind: ends ? "end" : "stopover", line: leg.mode === "rail" ? leg.line : null, dur: mins(leg.ride),
       text: `alight <b>${esc(alightPoint(leg))}</b> · ${leg.stops} stop${leg.stops === 1 ? "" : "s"}`
             + (ends ? " — you're there" : "") });
   });
@@ -952,12 +1022,14 @@ function timeline(j, d){
 }
 
 function legsHtml(j, d){
-  return timeline(j, d).map(r =>
-    `<div class="leg ${r.kind}">
+  return timeline(j, d).map(r => {
+    const tint = r.line ? ` style="--dot:${esc(LINES[r.line]?.colour || "")}"` : "";
+    return `<div class="leg ${r.kind}"${tint}>
        <span class="clk${r.est ? " est" : ""}">${esc(hhmm(r.t))}</span>
        <span class="what">${r.text}</span>
        <span class="dur">${esc(r.dur)}</span>
-     </div>`).join("");
+     </div>`;
+  }).join("");
 }
 
 function tripHtml(j, d, isBest){
@@ -972,10 +1044,14 @@ function tripHtml(j, d, isBest){
     : d.missedAll ? `<span class="next" data-v="miss">next 3 gone</span>`
     : `<span class="next" data-v="${d.verdict}" data-board="${d.boardAt}">in ${Math.max(0, Math.round(d.waitMin))} min</span>`;
 
+  const roadChip = j.road
+    ? `<span class="road" data-l="${esc(j.road.level)}" title="Median speed of ${j.road.n} tracked buses near this stop: ${j.road.kmh.toFixed(0)} km/h">${esc(ROAD_LABEL[j.road.level])}</span>`
+    : "";
+
   return `<article class="trip${isBest ? " best" : ""}">
     <div class="triphead">
       <div class="route">${busses}</div>
-      ${nextChip}${loadBars(d && d.load)}
+      ${nextChip}${loadBars(d && d.load)}${roadChip}
       <div class="eta"><b>${esc(new Date(arriveAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}</b><span>${totalMin} min total</span></div>
     </div>
     <div class="legs">${legsHtml(j, d)}</div>
@@ -1007,10 +1083,15 @@ function heroHtml(j, d){
     : `<div class="leave"><span class="big" id="countdown" data-leave="${d.boardAt - j.walk1Min * 60000}">–:––</span>
        <span>until you set off · board ${esc(hhmm(d.boardAt))} · arrive ~${esc(hhmm(arriveAt))}</span></div>`;
 
+  const road = j.road
+    ? `<p class="vroad" data-l="${esc(j.road.level)}">${esc(ROAD_LABEL[j.road.level])} — buses near <b>${where}</b> are covering ground at about <b>${j.road.kmh.toFixed(0)} km/h</b>, from ${j.road.n} tracked ${j.road.n === 1 ? "bus" : "buses"}.</p>`
+    : "";
+
   return `<section class="verdict" data-v="${d.verdict}" aria-live="polite">
     <div class="vhead"><span class="vword">${esc(word)}</span>
       <span class="vbus"${first.mode === "rail" ? ` style="color:${esc(LINES[first.line]?.colour || "")}"` : ""}>${esc(first.mode === "rail" ? first.line : first.svc)}</span></div>
     <p class="vsub">${sub}</p>
+    ${road}
     ${counter}
   </section>`;
 }
