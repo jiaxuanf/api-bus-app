@@ -52,6 +52,37 @@ visit, the app uses it on load without prompting again; if you haven't, nothing 
 ask for it. Either way the coordinates are used in the browser to sort the stop list and never
 leave it — there is no server here to send them to.
 
+## Trains
+
+MRT is in, and it changes the question. Singapore publishes **no live train-arrival feed** — nothing
+public, keyed or otherwise — so an MRT leg cannot be measured, only modelled. Which means the app's
+central verdict has to change on a train leg, and it does: it says **No rush**, never *Run*.
+
+That isn't a cop-out. Trains come every few minutes, so "should I sprint?" isn't a real decision —
+and manufacturing urgency out of an absence of data would be worse than saying nothing. The one
+question the app exists to answer honestly has a different answer for trains, so it gives one.
+
+Routing is a Dijkstra over `(station, line)` nodes, which makes interchanges fall out naturally:
+
+```
+14:13   you're at Changi Airport
+14:17   board the Changi Airport Branch          4 min wait
+~14:25  alight Tanah Merah · 2 stops                 9 min
+~14:29  board the East West Line                 4 min wait
+~14:50  alight City Hall · 9 stops                  21 min
+~14:54  board the North South Line               4 min wait
+~14:59  alight Orchard · 3 stops — you're there      5 min
+```
+
+Journeys can now mix modes — **bus → train** for a feeder to the nearest station, **train → bus**
+for the last mile — and every option is ranked against the others by arrival time, so a 47-minute
+train wins over a 61-minute bus without you having to compare them.
+
+Line chips carry the real line colours, because that's how the network is read on the ground.
+
+**Tuas → Pasir Ris now works.** It was the example of failure in this README's previous version;
+rail routing solves it in 93 minutes.
+
 ## What's live and what's estimated
 
 This distinction matters, so the app states it in its own footer too.
@@ -68,7 +99,13 @@ const WALK_DETOUR   = 1.35;  // you can't walk through buildings
 const BUS_KMH       = 18;    // SG average once dwell time at stops is counted
 const TRANSFER_WAIT = 6;     // assumed wait for a connecting bus
 const UNKNOWN_WAIT  = 8;     // assumed wait when a service reports no live arrival
+const RAIL_KMH      = 45;    // trains, including dwell
+const RAIL_WAIT     = 4;     // assumed headway to board
+const RAIL_CHANGE   = 4;     // platform to platform, plus the wait
 ```
+
+Sanity-checked against real journeys: Bugis → Jurong East 33 min, Bugis → Punggol 34, Changi Airport
+→ Orchard 47, Woodlands → Marina Bay 46. All within a couple of minutes of the real thing.
 
 Ride time is that speed along the **real route path** — the sum of the distances between the actual
 stops the bus calls at, not a straight line from A to B. Walking distances get the detour factor
@@ -76,9 +113,12 @@ for the same reason.
 
 ## Honest limits
 
-- **One change, maximum.** Cross-island trips that need two changes return "no route found".
-  Tuas → Pasir Ris is genuinely beyond it.
-- **Buses only.** No MRT, so some journeys look far worse than how you'd really travel.
+- **One bus change, maximum.** Rail can interchange as often as it needs to, and a journey may
+  combine one bus with rail, but bus → bus → bus is beyond it.
+- **No LRT.** The Bukit Panjang, Sengkang and Punggol lines are loops, and station-code order
+  doesn't describe a loop's direction, so including them would produce confidently wrong journeys.
+  Their MRT interchange stations are in.
+- **No live trains anywhere in the model**, because no such feed exists to consume.
 - **The second leg's wait is a guess.** Live arrivals tell you about *now*, not about the moment
   you'll reach the transfer stop 20 minutes from now. A flat 6 minutes is assumed and labelled
   `~` wherever it's shown.
@@ -97,6 +137,7 @@ server and no secrets.
 | [`stops.json`](https://data.busrouter.sg/v1/stops.json) | 5,207 stops as `[lng, lat, name, road]` |
 | [`services.json`](https://data.busrouter.sg/v1/services.json) | 605 services, each with its ordered stop list per direction — this is what makes routing possible |
 | [2-hour forecast](https://api-open.data.gov.sg/v2/real-time/api/two-hr-forecast) | data.gov.sg, 47 areas. Whether it's about to pour changes whether you run |
+| `data/rail.json` | 146 MRT stations, vendored here — 10 KB distilled from [cheeaun/sgraildata](https://github.com/cheeaun/sgraildata) by `scripts/build-rail-data.py`. Same origin as the page, so no third-party fetch and no upstream outage can take the trains away. Rebuild it with `python3 scripts/build-rail-data.py` |
 
 The first three are by [cheeaun](https://github.com/cheeaun), whose
 [busrouter.sg](https://busrouter.sg/) is the reference for what a genuinely useful product on this
@@ -112,8 +153,12 @@ gives up on.
 4. **One change:** everything reachable on a first bus, intersected with everything that feeds a
    destination stop on a second — including changes that need a short walk, found through a
    ~278 m spatial grid so it stays fast.
-5. Drop any change that arrives later than the best direct bus. Nobody transfers to get there slower.
-6. Fetch live arrivals for the distinct boarding stops, then re-rank by real arrival time.
+5. **Rail:** Dijkstra over `(station, line)` nodes. Adjacency comes from consecutive station codes
+   — NS7 follows NS6 — and an interchange is simply a station appearing on two lines, so a node like
+   Dhoby Ghaut (NS24 / NE6 / CC1) needs no special case. Sources carry the cost of getting there, so
+   one pass ranks walking to a station and taking a feeder bus to one against each other.
+6. Drop any change that arrives later than the best single-leg option. Nobody transfers to get there slower.
+7. Fetch live arrivals for the distinct boarding stops, then re-rank by real arrival time.
 
 ## Run it
 

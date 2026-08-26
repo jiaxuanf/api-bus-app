@@ -159,6 +159,10 @@ body{
   border-radius:6px; padding:.2rem .42rem .13rem;
 }
 .route .arr{color:var(--ink-3); font-size:.85rem}
+.bus.line{color:#fff; letter-spacing:.02em}
+.next[data-v="train"]{color:var(--ink-2)}
+.verdict[data-v="train"]{background:var(--surface); border-color:var(--line-2)}
+.verdict[data-v="train"] .vword{color:var(--ink)}
 .eta{margin-left:auto; text-align:right; line-height:1.15}
 .eta b{font-family:"Oswald", sans-serif; font-weight:600; font-size:1.15rem; font-variant-numeric:tabular-nums}
 .eta span{display:block; font-family:"DM Mono", monospace; font-size:.62rem; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3)}
@@ -303,6 +307,11 @@ footer p + p{margin-top:.5rem}
       (that is the SG average once dwell time at stops is counted), walking at 4.7&nbsp;km/h with a 1.35&times; detour factor
       because you cannot walk through buildings, and a transfer assumes a 6&nbsp;minute wait for the connecting bus.
       Treat the arrival clock as a good estimate, not a promise.</p>
+    <p><b>Trains are modelled end to end.</b> Singapore publishes no live train-arrival feed, so nothing on an MRT leg
+      is measured: 45&nbsp;km/h including dwell, a 4&nbsp;minute wait to board and 4&nbsp;minutes to change lines. That
+      is also why a train leg never tells you to run &mdash; inventing urgency from missing data would be worse than
+      saying nothing. LRT is left out: the Bukit Panjang, Sengkang and Punggol lines are loops, and station-code order
+      does not describe which way a loop runs.</p>
     <p>Stops, routes and arrivals from <a href="https://busrouter.sg/" target="_blank" rel="noopener">busrouter.sg</a>
       by <a href="https://github.com/cheeaun" target="_blank" rel="noopener">cheeaun</a> ·
       rain from <a href="https://data.gov.sg/" target="_blank" rel="noopener">data.gov.sg</a>.
@@ -344,11 +353,34 @@ const NEAR_RADIUS_M  = 500;    // how far you'll walk to reach a first / from a 
 const NEAR_CAP       = 8;
 const REFRESH_MS     = 20000;
 
+/* Rail. There is no public live train-arrival feed in Singapore, so every number
+   below is a model — which is exactly why a train leg never says "run". */
+const RAIL_URL       = "data/rail.json";
+const RAIL_KMH       = 45;     // average including dwell
+const RAIL_DWELL     = 0.6;    // minutes standing at each station
+const RAIL_WAIT      = 4;      // assumed headway wait to board
+const RAIL_CHANGE    = 4;      // platform to platform, plus the wait
+const RAIL_ACCESS_M  = 900;    // people walk further for a train than for a bus
+const BUS_RAIL_LINK_M= 350;    // bus stop <-> station, for feeder legs
+
+const LINES = {
+  NS: { name: "North South Line",         colour: "#D42E12" },
+  EW: { name: "East West Line",           colour: "#009645" },
+  CG: { name: "Changi Airport Branch",    colour: "#009645" },
+  NE: { name: "North East Line",          colour: "#9900AA" },
+  CC: { name: "Circle Line",              colour: "#FA9E0D" },
+  DT: { name: "Downtown Line",            colour: "#005EC4" },
+  TE: { name: "Thomson-East Coast Line",  colour: "#9D5B25" }
+};
+const lineName = code => LINES[code]?.name || code;
+const lineOf = code => code.slice(0, 2);
+
 const $ = id => document.getElementById(id);
 const main = $("main");
 
 let STOPS = [], BY_CODE = new Map(), SERVICES = null;
 let stopIndex = new Map();   // stopCode -> [{svc, dir, i}]
+let RAIL = [], railAdj = new Map(), railLines = new Map();
 let grid = new Map();        // spatial buckets for neighbour lookup
 let from = null, to = null;  // {kind:'here'|'stop', lat, lng, name, road, code}
 let journeys = [], liveAt = 0;
@@ -383,11 +415,46 @@ function clockAt(minutesFromNow){
   return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
+/* A coarse spatial grid over the stops. Cells are ~278 m, so a 3x3 block around any
+   point covers everything within a few hundred metres without scanning all 5,207 stops. */
+const CELL = 0.0025;
+const gridKey = (lat, lng) => Math.round(lat / CELL) + "|" + Math.round(lng / CELL);
+
+function neighbours(stop, radius){
+  const out = [], gy = Math.round(stop.lat / CELL), gx = Math.round(stop.lng / CELL);
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++){
+    for (const s of grid.get((gy + dy) + "|" + (gx + dx)) || []){
+      const d = haversine(stop, s);
+      if (d <= radius) out.push({ stop: s, d });
+    }
+  }
+  return out;
+}
+
+function nearStops(pt, radius = NEAR_RADIUS_M, cap = NEAR_CAP){
+  const all = STOPS.map(s => ({ stop: s, d: haversine(pt, s) })).sort((a, b) => a.d - b.d);
+  const within = all.filter(x => x.d <= radius).slice(0, cap);
+  return within.length ? within : all.slice(0, 2);   // nothing close by? offer the nearest anyway
+}
+
+/* Distance a bus actually covers between two points on its route — the sum of the hops
+   it makes, not the chord from one to the other. */
+function routeDist(route, i, j){
+  let d = 0;
+  for (let k = i; k < j; k++){
+    const a = BY_CODE.get(route[k]), b = BY_CODE.get(route[k + 1]);
+    if (a && b) d += haversine(a, b);
+  }
+  return d;
+}
+
 /* ---------------- data ---------------- */
 async function loadNetwork(){
-  const [rawStops, rawSvcs] = await Promise.all([
+  const [rawStops, rawSvcs, rawRail] = await Promise.all([
     fetch(STOPS_URL).then(r => { if(!r.ok) throw new Error("stops " + r.status); return r.json(); }),
-    fetch(SVCS_URL).then(r => { if(!r.ok) throw new Error("services " + r.status); return r.json(); })
+    fetch(SVCS_URL).then(r => { if(!r.ok) throw new Error("services " + r.status); return r.json(); }),
+    // vendored in this repo, so a rail outage upstream can't take the app down
+    fetchRail()
   ]);
 
   STOPS = Object.entries(rawStops).map(([code, v]) => ({ code, lng: v[0], lat: v[1], name: v[2], road: v[3] }));
@@ -407,46 +474,176 @@ async function loadNetwork(){
     if (!grid.has(k)) grid.set(k, []);
     grid.get(k).push(s);
   }
+  buildRail(rawRail);
 }
 
-const CELL = 0.0025;                                   // ~278 m
-const gridKey = (lat, lng) => Math.round(lat/CELL) + "|" + Math.round(lng/CELL);
+/* One retry, then give up loudly rather than quietly turning into a bus-only app.
+   Silent degradation is indistinguishable from a routing bug. */
+async function fetchRail(){
+  for (let attempt = 0; attempt < 2; attempt++){
+    try {
+      const r = await fetch(RAIL_URL);
+      if (r.ok) return await r.json();
+    } catch (e){ /* retry once — a dropped connection shouldn't cost you the trains */ }
+  }
+  return null;
+}
 
-function neighbours(stop, radius){
-  const out = [], gy = Math.round(stop.lat/CELL), gx = Math.round(stop.lng/CELL);
-  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++){
-    const bucket = grid.get((gy+dy) + "|" + (gx+dx));
-    if (!bucket) continue;
-    for (const s of bucket){
-      const d = haversine(stop, s);
-      if (d <= radius) out.push({ stop: s, d });
+/* Station codes carry the network: NS7 is the 7th stop on the North South line, and a
+   station listing NS24/NE6/CC1 is one node sitting on three lines. That is the whole
+   graph — adjacency comes from consecutive numbers, interchanges from shared stations. */
+function buildRail(raw){
+  if (!raw || !raw.stations) return;                 // rail is optional; buses still work
+  RAIL = raw.stations.map((s, id) => ({ ...s, id, lines: [...new Set(s.codes.map(lineOf))] }));
+
+  for (const st of RAIL)
+    for (const code of st.codes){
+      const ln = lineOf(code), n = parseInt(code.slice(2), 10);
+      if (!LINES[ln] || !Number.isFinite(n)) continue;
+      if (!railLines.has(ln)) railLines.set(ln, []);
+      railLines.get(ln).push({ n, suffix: code.slice(2).replace(/^\d+/, ""), st });
+    }
+
+  const link = (a, b, w) => {
+    if (!railAdj.has(a)) railAdj.set(a, []);
+    railAdj.get(a).push([b, w]);
+  };
+  for (const [ln, seq] of railLines){
+    seq.sort((a, b) => a.n - b.n || a.suffix.localeCompare(b.suffix));
+    for (let k = 0; k < seq.length - 1; k++){
+      const a = seq[k].st, b = seq[k + 1].st;
+      const w = haversine(a, b) / 1000 / RAIL_KMH * 60 + RAIL_DWELL;
+      link(a.id + "|" + ln, b.id + "|" + ln, w);
+      link(b.id + "|" + ln, a.id + "|" + ln, w);
     }
   }
-  return out;
+  for (const st of RAIL)
+    for (const a of st.lines)
+      for (const b of st.lines)
+        if (a !== b) link(st.id + "|" + a, st.id + "|" + b, RAIL_CHANGE);
 }
 
-function nearStops(pt, radius = NEAR_RADIUS_M, cap = NEAR_CAP){
-  const all = STOPS.map(s => ({ stop: s, d: haversine(pt, s) })).sort((a, b) => a.d - b.d);
-  const within = all.filter(x => x.d <= radius).slice(0, cap);
-  return within.length ? within : all.slice(0, 2);
+function nearStations(pt, radius = RAIL_ACCESS_M, cap = 4){
+  return RAIL.map(st => ({ st, d: haversine(pt, st) }))
+    .filter(x => x.d <= radius)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, cap);
 }
 
-function routeDist(route, i, j){
-  let d = 0;
-  for (let k = i; k < j; k++){
-    const a = BY_CODE.get(route[k]), b = BY_CODE.get(route[k+1]);
-    if (a && b) d += haversine(a, b);
+/* Dijkstra over (station, line) nodes. Sources carry the cost of already having got
+   there — walking, or a feeder bus — so one pass ranks every way in. */
+function railSearch(sources){
+  const dist = new Map(), prev = new Map(), pq = [];
+  const push = (node, cost) => {
+    if (cost >= (dist.get(node) ?? Infinity)) return;
+    dist.set(node, cost);
+    pq.push([cost, node]);
+  };
+  for (const src of sources)
+    for (const ln of src.st.lines){
+      const node = src.st.id + "|" + ln;
+      if (src.cost < (dist.get(node) ?? Infinity)){
+        dist.set(node, src.cost);
+        prev.set(node, { origin: src });
+        pq.push([src.cost, node]);
+      }
+    }
+  while (pq.length){
+    pq.sort((a, b) => a[0] - b[0]);
+    const [cost, node] = pq.shift();
+    if (cost > (dist.get(node) ?? Infinity)) continue;
+    for (const [next, w] of railAdj.get(node) || []){
+      if (cost + w < (dist.get(next) ?? Infinity)){
+        dist.set(next, cost + w);
+        prev.set(next, { from: node, w });
+        pq.push([cost + w, next]);
+      }
+    }
   }
-  return d;
+  return { dist, prev };
+}
+
+/* Walk the predecessor chain back, collapsing runs on the same line into one leg.
+   Ride time is the sum of the real edge weights — measuring the chord between a leg's
+   endpoints would quietly shorten every curved stretch of line. */
+function railLegs(prev, endNode){
+  const chain = [];
+  let node = endNode, origin = null;
+  while (node){
+    const p = prev.get(node);
+    chain.push({ node, w: p && p.w ? p.w : 0 });
+    if (!p || p.origin){ origin = p && p.origin; break; }
+    node = p.from;
+  }
+  chain.reverse();
+
+  const legs = [];
+  for (let k = 0; k < chain.length; k++){
+    const [idStr, ln] = chain[k].node.split("|");
+    const st = RAIL[Number(idStr)];
+    const last = legs[legs.length - 1];
+    const stepIn = k > 0 ? chain[k].w : 0;      // cost of arriving at this node
+
+    if (last && last.line === ln){
+      last.to = st;
+      last.stops++;
+      last.ride += stepIn;
+    } else {
+      legs.push({ mode: "rail", line: ln, fromS: st, to: st, stops: 0, ride: 0,
+                  wait: legs.length ? RAIL_CHANGE : RAIL_WAIT });
+    }
+  }
+  // zero-stop legs are interchange artefacts; their cost already sits in the next leg's wait
+  return { legs: legs.filter(l => l.stops > 0), origin };
 }
 
 /* ---------------- journey planning ---------------- */
+/* Every journey has the same shape whatever it is made of:
+     walk1 -> legs[] -> walk2
+   and each leg carries the wait before boarding it and, if it isn't the first,
+   the walk from where the previous leg dropped you. */
+
+function busLeg(svc, dir, from, to, stops, ride){
+  return { mode: "bus", svc, dir, from, to, stops, ride, wait: TRANSFER_WAIT, link: null };
+}
+
 function plan(origin, dest){
   const originNear = nearStops(origin), destNear = nearStops(dest);
-  const oWalk = new Map(originNear.map(x => [x.stop.code, x.d]));
-  const dWalk = new Map(destNear.map(x => [x.stop.code, x.d]));
+  const out = [];
 
-  // where each service+direction touches the destination cluster
+  /* --- everything one bus from here can reach, cheapest-first --- */
+  const reach = new Map();
+  for (const { stop, d: dOrigin } of originNear)
+    for (const e of stopIndex.get(stop.code) || []){
+      const route = SERVICES[e.svc].routes[e.dir];
+      const w1 = walkMin(dOrigin);
+      for (let j = e.i + 1; j < Math.min(route.length, e.i + 60); j++){
+        if (!BY_CODE.has(route[j])) continue;
+        const ride = rideMin(routeDist(route, e.i, j));
+        const cost = w1 + ride;
+        if (cost < (reach.get(route[j])?.cost ?? Infinity))
+          reach.set(route[j], { cost, ride, svc: e.svc, dir: e.dir, board: stop.code,
+                                walk1: dOrigin, walk1Min: w1, stops: j - e.i });
+      }
+    }
+
+  /* --- and every stop from which one bus finishes the trip --- */
+  const feed = new Map();
+  for (const { stop, d: dDest } of destNear)
+    for (const e of stopIndex.get(stop.code) || []){
+      const route = SERVICES[e.svc].routes[e.dir];
+      const w2 = walkMin(dDest);
+      for (let j = Math.max(0, e.i - 60); j < e.i; j++){
+        if (!BY_CODE.has(route[j])) continue;
+        const ride = rideMin(routeDist(route, j, e.i));
+        const cost = ride + w2;
+        if (cost < (feed.get(route[j])?.cost ?? Infinity))
+          feed.set(route[j], { cost, ride, svc: e.svc, dir: e.dir, from: route[j], to: stop.code,
+                               stops: e.i - j, walk2: dDest, walk2Min: w2 });
+      }
+    }
+
+  /* --- one bus --- */
   const destPos = new Map();
   for (const { stop } of destNear)
     for (const e of stopIndex.get(stop.code) || []){
@@ -455,101 +652,151 @@ function plan(origin, dest){
       destPos.get(k).push({ i: e.i, code: stop.code });
     }
   for (const arr of destPos.values()) arr.sort((a, b) => a.i - b.i);
+  const dWalk = new Map(destNear.map(x => [x.stop.code, x.d]));
 
-  const out = [];
-
-  /* --- one bus --- */
   for (const { stop, d: dOrigin } of originNear)
     for (const e of stopIndex.get(stop.code) || []){
-      const hits = destPos.get(e.svc + "|" + e.dir);
-      if (!hits) continue;
-      const hit = hits.find(h => h.i > e.i);
+      const hit = (destPos.get(e.svc + "|" + e.dir) || []).find(h => h.i > e.i);
       if (!hit) continue;
       const route = SERVICES[e.svc].routes[e.dir];
       const w1 = walkMin(dOrigin), w2 = walkMin(dWalk.get(hit.code));
       const ride = rideMin(routeDist(route, e.i, hit.i));
-      out.push({
-        kind: "direct", board: stop.code, walk1: dOrigin, walk1Min: w1,
-        legs: [{ svc: e.svc, dir: e.dir, from: stop.code, to: hit.code, stops: hit.i - e.i, ride }],
-        walk2: dWalk.get(hit.code), walk2Min: w2,
-        est: w1 + ride + w2   // provisional: no waiting time yet
-      });
+      out.push({ kind: "bus", board: stop.code, walk1: dOrigin, walk1Min: w1,
+                 legs: [busLeg(e.svc, e.dir, stop.code, hit.code, hit.i - e.i, ride)],
+                 walk2: dWalk.get(hit.code), walk2Min: w2, est: w1 + ride + w2 });
     }
 
-  /* --- two buses, one change --- */
-  // everything reachable on a first bus, cheapest-first
-  const reach = new Map();
-  for (const { stop, d: dOrigin } of originNear)
-    for (const e of stopIndex.get(stop.code) || []){
-      const route = SERVICES[e.svc].routes[e.dir];
-      const w1 = walkMin(dOrigin);
-      for (let j = e.i + 1; j < Math.min(route.length, e.i + 60); j++){
-        const code = route[j];
-        if (!BY_CODE.has(code)) continue;
-        const cost = w1 + rideMin(routeDist(route, e.i, j));
-        const prev = reach.get(code);
-        if (!prev || cost < prev.cost)
-          reach.set(code, { cost, svc: e.svc, dir: e.dir, board: stop.code, walk1: dOrigin, walk1Min: w1, bi: e.i, ai: j, stops: j - e.i });
-      }
+  /* --- two buses --- */
+  const seenPair = new Set();
+  for (const [code, f] of feed){
+    const boardStop = BY_CODE.get(code);
+    if (!boardStop) continue;
+    for (const { stop: alight, d: xWalk } of [{ stop: boardStop, d: 0 }]
+        .concat(neighbours(boardStop, TRANSFER_MAX_M).filter(n => n.stop.code !== code))){
+      const first = reach.get(alight.code);
+      if (!first || first.svc === f.svc) continue;
+      const key = first.svc + ">" + f.svc + "@" + alight.code;
+      if (seenPair.has(key)) continue;
+      seenPair.add(key);
+      const xMin = walkMin(xWalk);
+      const l2 = busLeg(f.svc, f.dir, f.from, f.to, f.stops, f.ride);
+      l2.link = { walk: xWalk, walkMin: xMin, to: code };
+      out.push({ kind: "bus+bus", board: first.board, walk1: first.walk1, walk1Min: first.walk1Min,
+                 legs: [busLeg(first.svc, first.dir, first.board, alight.code, first.stops, first.ride), l2],
+                 walk2: f.walk2, walk2Min: f.walk2Min,
+                 est: first.cost + xMin + TRANSFER_WAIT + f.cost });
     }
+  }
 
-  const seen = new Set();
-  for (const { stop, d: dDest } of destNear)
-    for (const e of stopIndex.get(stop.code) || []){
-      const route = SERVICES[e.svc].routes[e.dir];
-      const w2 = walkMin(dDest);
-      for (let j = Math.max(0, e.i - 60); j < e.i; j++){
-        const code = route[j];
-        const boardStop = BY_CODE.get(code);
-        if (!boardStop) continue;
+  /* --- rail, and rail combined with one bus --- */
+  if (RAIL.length){
+    const oStations = nearStations(origin), dStations = nearStations(dest);
 
-        // change here, or walk a short way to change
-        const options = [{ stop: boardStop, d: 0 }].concat(
-          neighbours(boardStop, TRANSFER_MAX_M).filter(n => n.stop.code !== code)
-        );
-        for (const { stop: alight, d: xWalk } of options){
-          const first = reach.get(alight.code);
-          if (!first || first.svc === e.svc) continue;
-          const ride2 = rideMin(routeDist(route, j, e.i));
-          const xMin = walkMin(xWalk);
-          const key = first.svc + ">" + e.svc + "@" + alight.code;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          out.push({
-            kind: "transfer", board: first.board, walk1: first.walk1, walk1Min: first.walk1Min,
-            legs: [
-              { svc: first.svc, dir: first.dir, from: first.board, to: alight.code, stops: first.stops,
-                ride: first.cost - first.walk1Min },
-              { svc: e.svc, dir: e.dir, from: code, to: stop.code, stops: e.i - j, ride: ride2 }
-            ],
-            change: { from: alight.code, to: code, walk: xWalk, walkMin: xMin },
-            walk2: dDest, walk2Min: w2,
-            est: first.cost + xMin + TRANSFER_WAIT + ride2 + w2
-          });
+    // (a) walk to a station
+    if (oStations.length && dStations.length){
+      const { dist, prev } = railSearch(oStations.map(x => ({ st: x.st, cost: walkMin(x.d), walk: x.d })));
+      addRailArrivals(out, dist, prev, dStations, "rail");
+
+      // (c) train, then a bus for the last bit
+      for (const st of RAIL){
+        const best = bestNodeAt(dist, st);
+        if (!best) continue;
+        for (const { stop, d: linkD } of nearbyStops(st, BUS_RAIL_LINK_M)){
+          const f = feed.get(stop.code);
+          if (!f) continue;
+          const { legs, origin: src } = railLegs(prev, best.node);
+          if (!legs.length) continue;
+          const linkMin = walkMin(linkD);
+          const l = busLeg(f.svc, f.dir, f.from, f.to, f.stops, f.ride);
+          l.link = { walk: linkD, walkMin: linkMin, to: stop.code };
+          out.push({ kind: "rail+bus", board: null, walk1: src.walk, walk1Min: walkMin(src.walk),
+                     legs: [...legs, l], walk2: f.walk2, walk2Min: f.walk2Min,
+                     est: best.cost + RAIL_WAIT + linkMin + TRANSFER_WAIT + f.cost });
         }
       }
     }
 
-  // one option per service combination, cheapest kept, direct routes preferred
+    // (b) feeder bus to a station, then the train
+    if (dStations.length){
+      const sources = [];
+      for (const [code, r] of reach){
+        const stop = BY_CODE.get(code);
+        if (!stop) continue;
+        for (const { st, d } of nearbyStations(stop, BUS_RAIL_LINK_M))
+          sources.push({ st, cost: r.cost + walkMin(d) + TRANSFER_WAIT,
+                         feeder: r, alightCode: code, link: d, walk: r.walk1 });
+      }
+      if (sources.length){
+        const { dist, prev } = railSearch(sources);
+        addRailArrivals(out, dist, prev, dStations, "bus+rail");
+      }
+    }
+  }
+
+  /* --- keep the ones worth showing --- */
   const best = new Map();
   for (const j of out){
-    const key = j.legs.map(l => l.svc).join(">");
-    const prior = best.get(key);
-    if (!prior || j.est < prior.est) best.set(key, j);
+    const key = j.legs.map(l => l.mode === "bus" ? l.svc : l.line).join(">");
+    if (j.est < (best.get(key)?.est ?? Infinity)) best.set(key, j);
   }
   let kept = [...best.values()];
 
-  // a change of bus has to earn its place: nobody transfers to arrive later
-  const bestDirect = Math.min(...kept.filter(j => j.kind === "direct").map(j => j.est), Infinity);
-  if (Number.isFinite(bestDirect))
-    kept = kept.filter(j => j.kind === "direct" || j.est < bestDirect + 2);
+  // a change has to earn its place: nobody transfers to arrive later
+  const simplest = Math.min(...kept.filter(j => j.legs.length === 1).map(j => j.est), Infinity);
+  if (Number.isFinite(simplest))
+    kept = kept.filter(j => j.legs.length === 1 || j.est < simplest + 2);
 
   return kept.sort((a, b) => a.est - b.est).slice(0, 8);
 }
 
+function bestNodeAt(dist, st){
+  let best = null;
+  for (const ln of st.lines){
+    const node = st.id + "|" + ln, c = dist.get(node);
+    if (c !== undefined && c < (best?.cost ?? Infinity)) best = { node, cost: c };
+  }
+  return best;
+}
+
+function nearbyStops(pt, radius){
+  const gy = Math.round(pt.lat / CELL), gx = Math.round(pt.lng / CELL), out = [];
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++)
+    for (const s of grid.get((gy + dy) + "|" + (gx + dx)) || []){
+      const d = haversine(pt, s);
+      if (d <= radius) out.push({ stop: s, d });
+    }
+  return out.sort((a, b) => a.d - b.d).slice(0, 3);
+}
+function nearbyStations(pt, radius){
+  return RAIL.map(st => ({ st, d: haversine(pt, st) })).filter(x => x.d <= radius)
+    .sort((a, b) => a.d - b.d).slice(0, 2);
+}
+
+function addRailArrivals(out, dist, prev, dStations, kind){
+  for (const { st, d: walkOut } of dStations){
+    const best = bestNodeAt(dist, st);
+    if (!best) continue;
+    const { legs, origin: src } = railLegs(prev, best.node);
+    if (!legs.length) continue;
+    const w2 = walkMin(walkOut);
+
+    if (kind === "bus+rail" && src && src.feeder){
+      const f = src.feeder;
+      const first = busLeg(f.svc, f.dir, f.board, src.alightCode, f.stops, f.ride);
+      legs[0].link = { walk: src.link, walkMin: walkMin(src.link), toStation: src.st };
+      out.push({ kind, board: f.board, walk1: f.walk1, walk1Min: f.walk1Min,
+                 legs: [first, ...legs], walk2: walkOut, walk2Min: w2,
+                 est: best.cost + RAIL_WAIT + w2 });
+    } else if (kind === "rail"){
+      out.push({ kind, board: null, walk1: src ? src.walk : 0, walk1Min: walkMin(src ? src.walk : 0),
+                 legs, walk2: walkOut, walk2Min: w2, est: best.cost + RAIL_WAIT + w2 });
+    }
+  }
+}
+
 /* ---------------- live arrivals ---------------- */
 async function attachLive(list){
-  const stops = [...new Set(list.map(j => j.board))].slice(0, 5);
+  const stops = [...new Set(list.filter(j => j.board).map(j => j.board))].slice(0, 5);
   inflight.forEach(c => c.abort());
   inflight = [];
 
@@ -570,6 +817,7 @@ async function attachLive(list){
   liveAt = Date.now();
 
   for (const j of list){
+    if (!j.board){ j.live = "rail"; j.arrivals = []; continue; }   // no live train feed exists
     const services = byStop.get(j.board);
     j.live = services === null ? "error" : "ok";
     j.arrivals = [];
@@ -583,8 +831,14 @@ async function attachLive(list){
   return list;
 }
 
-/* the decision: the first bus you can still physically reach */
+/* the decision: the first bus you can still physically reach.
+   A train leg has no departure to miss — Singapore publishes no live train arrivals,
+   and headways are short enough that running for one is not a real decision. Saying
+   "run" there would be inventing urgency out of an absence of data. */
 function decide(j, now){
+  if (j.legs[0].mode === "rail")
+    return { verdict: "train", waitMin: RAIL_WAIT,
+             boardAt: now + (j.walk1Min + RAIL_WAIT) * 60000, modelled: true };
   const walkMs = j.walk1Min * 60000;
   if (!j.arrivals || !j.arrivals.length) return null;
   const reachable = j.arrivals.find(a => a.at - now >= walkMs - 45000);   // 45s of grace
@@ -595,7 +849,7 @@ function decide(j, now){
 }
 
 /* ---------------- rendering ---------------- */
-const VERDICT_WORD = { run: "Run", soon: "Walk now", calm: "You have time", miss: "Missed it" };
+const VERDICT_WORD = { run: "Run", soon: "Walk now", calm: "You have time", miss: "Missed it", train: "No rush" };
 
 // no live arrival means no known wait — assume a typical one rather than zero, so a
 // service with no data can't leapfrog one we can actually see coming
@@ -611,59 +865,64 @@ function loadBars(load){
 
 const hhmm = t => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
+const legName = l => l.mode === "bus" ? "bus " + l.svc : lineName(l.line);
+const boardPoint = l => l.mode === "bus" ? (BY_CODE.get(l.from)?.name || l.from) : l.fromS.name;
+const alightPoint = l => l.mode === "bus" ? (BY_CODE.get(l.to)?.name || l.to) : l.to.name;
+
 /* Every waypoint of the trip with the clock time you reach it.
-   `est` marks a time that rests on a modelled number rather than a live one —
-   everything after boarding does, and so does the boarding itself with no live arrival. */
+   `est` marks a time resting on a modelled number rather than a live one. Only a bus's
+   first boarding is ever live — Singapore publishes no train arrivals at all. */
 function timeline(j, d){
   const now = Date.now(), M = 60000;
   const rows = [];
-  const boardStop = BY_CODE.get(j.board);
+  const first = j.legs[0];
+  const startName = boardPoint(first);
 
   const reachStop = now + j.walk1Min * M;
-  const boardAt = d && d.boardAt ? d.boardAt : reachStop + UNKNOWN_WAIT * M;
   const liveBoard = !!(d && d.boardAt);
+  const boardAt = liveBoard ? d.boardAt : reachStop + (first.mode === "rail" ? RAIL_WAIT : UNKNOWN_WAIT) * M;
 
   rows.push({ t: now, est: false, kind: "start", dur: "",
     text: atStop(j.walk1)
-      ? `you're at <b>${esc(boardStop ? boardStop.name : j.board)}</b>`
+      ? `you're at <b>${esc(startName)}</b>`
       : `set off — <b>${metres(j.walk1)}</b> on foot` });
 
   if (!atStop(j.walk1))
     rows.push({ t: reachStop, est: false, kind: "stopover", dur: mins(j.walk1Min),
-      text: `reach <b>${esc(boardStop ? boardStop.name : j.board)}</b>` });
+      text: `reach <b>${esc(startName)}</b>` });
 
-  // one row per boarding: the clock is when you get on, the duration is what you
-  // spent waiting to do it. Two rows would put the same moment on the page twice.
-  const waitMin = (boardAt - reachStop) / M;
   let t = boardAt;
-
   j.legs.forEach((leg, n) => {
-    const waited = n === 0 ? waitMin : (j.change ? TRANSFER_WAIT : 0);
+    if (n > 0 && leg.link && leg.link.walk > 20){
+      t += leg.link.walkMin * M;
+      const dest = leg.link.toStation ? leg.link.toStation.name : (BY_CODE.get(leg.link.to)?.name || "");
+      rows.push({ t, est: true, kind: "stopover", dur: mins(leg.link.walkMin),
+        text: `walk ${metres(leg.link.walk)} to <b>${esc(dest)}</b>` });
+    }
+    if (n > 0) t += leg.wait * M;
+
+    const waited = n === 0 ? (boardAt - reachStop) / M : leg.wait;
     rows.push({ t, est: n > 0 || !liveBoard, kind: "ride",
-      text: `board bus <b>${esc(leg.svc)}</b>`,
+      text: leg.mode === "bus"
+        ? `board bus <b>${esc(leg.svc)}</b>`
+        : `board the <b>${esc(lineName(leg.line))}</b>`,
       dur: waited > 0.5 ? `${Math.round(waited)} min wait` : "" });
 
     t += leg.ride * M;
-    const alight = BY_CODE.get(leg.to);
-    rows.push({ t, est: true, kind: "stopover", dur: mins(leg.ride),
-      text: `alight <b>${esc(alight ? alight.name : leg.to)}</b> · ${leg.stops} stop${leg.stops === 1 ? "" : "s"}` });
-
-    if (n === 0 && j.change){
-      if (j.change.walk > 20){
-        t += j.change.walkMin * M;
-        const cTo = BY_CODE.get(j.change.to);
-        rows.push({ t, est: true, kind: "stopover", dur: mins(j.change.walkMin),
-          text: `walk ${metres(j.change.walk)} to <b>${esc(cTo ? cTo.name : j.change.to)}</b>` });
-      }
-      t += TRANSFER_WAIT * M;   // becomes the moment you board the connecting bus
-    }
+    const last = n === j.legs.length - 1;
+    // if the last stop IS the destination, one row says so — two would name the same
+    // place twice at the same minute
+    const ends = last && atStop(j.walk2);
+    rows.push({ t, est: true, kind: ends ? "end" : "stopover", dur: mins(leg.ride),
+      text: `alight <b>${esc(alightPoint(leg))}</b> · ${leg.stops} stop${leg.stops === 1 ? "" : "s"}`
+            + (ends ? " — you're there" : "") });
   });
 
-  t += j.walk2Min * M;
-  rows.push({ t, est: true, kind: "end", dur: atStop(j.walk2) ? "" : mins(j.walk2Min),
-    text: atStop(j.walk2)
-      ? `arrive <b>${esc(to.name)}</b>`
-      : `walk ${metres(j.walk2)} — arrive <b>${esc(to.name)}</b>` });
+  if (!atStop(j.walk2)){
+    t += j.walk2Min * M;
+    rows.push({ t, est: true, kind: "end", dur: mins(j.walk2Min),
+      text: `walk ${metres(j.walk2)} — arrive <b>${esc(to.name)}</b>` });
+  }
 
   return rows;
 }
@@ -680,9 +939,12 @@ function legsHtml(j, d){
 function tripHtml(j, d, isBest){
   const arriveAt = tripArriveAt(j, d);
   const totalMin = Math.round((arriveAt - Date.now()) / 60000);
-  const busses = j.legs.map(l => `<span class="bus">${esc(l.svc)}</span>`)
+  const busses = j.legs.map(l => l.mode === "bus"
+      ? `<span class="bus">${esc(l.svc)}</span>`
+      : `<span class="bus line" style="background:${esc(LINES[l.line]?.colour || "#666")}">${esc(l.line)}</span>`)
     .join('<span class="arr">→</span>');
   const nextChip = !d ? `<span class="next" data-v="miss">no live data</span>`
+    : d.verdict === "train" ? `<span class="next" data-v="train">every ~${RAIL_WAIT} min</span>`
     : d.missedAll ? `<span class="next" data-v="miss">next 3 gone</span>`
     : `<span class="next" data-v="${d.verdict}" data-board="${d.boardAt}">in ${Math.max(0, Math.round(d.waitMin))} min</span>`;
 
@@ -702,20 +964,28 @@ function heroHtml(j, d){
   let word = VERDICT_WORD[d.verdict];
   if (atStop(j.walk1) && d.verdict === "run") word = "Board now";
   if (atStop(j.walk1) && d.verdict === "soon") word = "Nearly here";
-  const where = esc(b ? b.name : "");
-  const sub = d.missedAll
-    ? `The next three <b>${esc(j.legs[0].svc)}</b> buses all leave before you could walk the ${metres(j.walk1)} to <b>${where}</b>.`
-    : atStop(j.walk1)
-      ? `Bus <b>${esc(j.legs[0].svc)}</b>, from <b>${where}</b> — the stop you're standing at.`
-      : `Take bus <b>${esc(j.legs[0].svc)}</b> from <b>${where}</b> — ${metres(j.walk1)} away, about ${mins(j.walk1Min)} on foot.`;
+  const first = j.legs[0];
+  const where = esc(first.mode === "rail" ? first.fromS.name : (b ? b.name : ""));
+  const sub = first.mode === "rail"
+    ? `Take the <b>${esc(lineName(first.line))}</b> from <b>${where}</b>` +
+      (atStop(j.walk1) ? "" : ` — ${metres(j.walk1)} away, about ${mins(j.walk1Min)} on foot`) +
+      `. Trains run every few minutes, so there is nothing to run for.`
+    : d.missedAll
+      ? `The next three <b>${esc(first.svc)}</b> buses all leave before you could walk the ${metres(j.walk1)} to <b>${where}</b>.`
+      : atStop(j.walk1)
+        ? `Bus <b>${esc(first.svc)}</b>, from <b>${where}</b> — the stop you're standing at.`
+        : `Take bus <b>${esc(first.svc)}</b> from <b>${where}</b> — ${metres(j.walk1)} away, about ${mins(j.walk1Min)} on foot.`;
 
   const arriveAt = tripArriveAt(j, d);
-  const counter = d.missedAll ? "" :
-    `<div class="leave"><span class="big" id="countdown" data-leave="${d.boardAt - j.walk1Min * 60000}">–:––</span>
+  const counter = d.verdict === "train"
+    ? `<div class="leave"><span class="big">~${esc(hhmm(arriveAt))}</span> <span>arrival · ${mins((arriveAt - Date.now()) / 60000)} door to door</span></div>`
+    : d.missedAll ? ""
+    : `<div class="leave"><span class="big" id="countdown" data-leave="${d.boardAt - j.walk1Min * 60000}">–:––</span>
        <span>until you set off · board ${esc(hhmm(d.boardAt))} · arrive ~${esc(hhmm(arriveAt))}</span></div>`;
 
   return `<section class="verdict" data-v="${d.verdict}" aria-live="polite">
-    <div class="vhead"><span class="vword">${esc(word)}</span><span class="vbus">${esc(j.legs[0].svc)}</span></div>
+    <div class="vhead"><span class="vword">${esc(word)}</span>
+      <span class="vbus"${first.mode === "rail" ? ` style="color:${esc(LINES[first.line]?.colour || "")}"` : ""}>${esc(first.mode === "rail" ? first.line : first.svc)}</span></div>
     <p class="vsub">${sub}</p>
     ${counter}
   </section>`;
@@ -733,8 +1003,11 @@ function renderJourneys(){
   const hero = scored.find(s => s.d && !s.d.missedAll) || scored[0];
   const rest = scored.filter(s => s !== hero);
 
+  const railWarning = RAIL.length ? "" :
+    `<div class="note" style="padding:.6rem .8rem;font-size:.82rem">Trains couldn't be loaded — these are bus-only routes. Reload to try again.</div>`;
+
   main.innerHTML =
-    heroHtml(hero.j, hero.d) +
+    heroHtml(hero.j, hero.d) + railWarning +
     `<div class="sect">Every way there <span class="tick"><i id="tickbar"></i></span> <span id="stamp">live</span></div>` +
     tripHtml(hero.j, hero.d, true) +
     rest.map(s => tripHtml(s.j, s.d, false)).join("");
